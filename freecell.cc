@@ -12,10 +12,19 @@ using std::deque;
 using std::endl;
 using std::priority_queue;
 using std::string;
-using std::unordered_set;
 using std::vector;
 
-constexpr size_t RESERVE_SIZE = 4;
+template<typename... K>
+using u_set = std::unordered_set<K...>;
+
+constexpr size_t RESERVE_SIZE = 4; // Number of reserve slots.
+constexpr size_t GC_UPPER_BOUND = 600000; // Maximum search space.
+constexpr size_t GC_LOWER_BOUND = 300000; // Search space prune length.
+
+
+// =============================================================================
+// === Representation ==========================================================
+// =============================================================================
 
 struct Card {
   enum Suit { SPADE, HEART, DIAMOND, CLUB } suit {};
@@ -26,11 +35,22 @@ struct Card {
   string str() const {
     static string names[] = {
       "ERR", "Ace", "Two", "Three", "Four", "Five", "Six", "Seven",
-      "Eight", "Nine", "Ten", "Jack", "Queen", "King" 
+      "Eight", "Nine", "Ten", "Jack", "Queen", "King"
     };
     static string suits[] = { "Spades", "Hearts", "Diamonds", "Clubs" };
     if (!face) return "Empty";
     return names[face] + " of " + suits[suit];
+  }
+  
+  string chr() const {
+    if (!face) return "🂠";
+    int ordinal = 0x1F0A0 + 0x10 * suit + face + (face > Card::Face::J);
+    string res(4, 0);
+    res[0] = 0b11110000;
+    res[1] = 0b10000000 | ((ordinal & (0b111111 << 12)) >> 12);
+    res[2] = 0b10000000 | ((ordinal & (0b111111 << 6))  >> 6);
+    res[3] = 0b10000000 | (ordinal & 0b111111);
+    return res;
   }
   
   string desc() const {
@@ -49,7 +69,16 @@ struct Card {
     return suit == c.suit && face == c.face;
   }
   
+  char serialize() const {
+    return suit * 16 + face;
+  }
+  
+  static Card deserialize(char c) {
+    return Card((Face) (c & 15), (Suit) (c / 16));
+  }
+  
   Card() {}
+  Card(Face f, Suit s): suit(s), face(f) {}
   Card(string desc) {
     size_t i = 0;
     while (i < desc.length() && std::isspace(desc[i])) ++i;
@@ -76,7 +105,7 @@ struct Card {
     } else {
       int facev = atoi(desc.substr(f, i - f).c_str());
       if (facev < Face::A || facev > Face::K) {
-        cerr << "Failed to read card face: card " << desc 
+        cerr << "Failed to read card face: card " << desc
              << " has invalid face value '" << facev << "'." << endl;
         abort();
       }
@@ -109,30 +138,89 @@ struct Card {
 };
 
 typedef deque<Card> Cascade;
-typedef vector<string> MoveList;
+
+struct Move {
+  enum Place : char { CASCADE = -3, RESERVE = -2, FOUNDATION = -1 };
+  const string& board_state;
+  char source;
+  char dest;
+  char reserve[RESERVE_SIZE] {};
+  
+  static const string kSentinel;
+
+  string str() const {
+    return "Move " + name(source) + " onto " + name(dest);
+  }
+
+  Move(Card c, Card d):
+      board_state(kSentinel), source(c.serialize()), dest(d.serialize()) {}
+  Move(Card c, Place p):
+      board_state(kSentinel), source(c.serialize()), dest(p) {}
+  Move(Card c, const Cascade &d):
+      board_state(kSentinel), source(c.serialize()), dest(place(d)) {}
+  Move(const Cascade &c, const Cascade &d):
+      board_state(kSentinel), source(c.back().serialize()), dest(place(d)) {}
+  Move(const Cascade &c, Place p):
+      board_state(kSentinel), source(c.back().serialize()), dest(p) {}
+  Move(const string& b, const Move& m):
+      board_state(b), source(m.source), dest(m.dest) {
+    for (size_t i = 0; i < RESERVE_SIZE; ++i) reserve[i] = m.reserve[i];
+  }
+  Move(const string& b, const vector<Card> &r, const Move& m):
+      board_state(b), source(m.source), dest(m.dest) {
+    for (size_t i = 0; i < r.size(); ++i) reserve[i] = r[i].serialize();
+  }
+  
+ private:
+  static char place(const Cascade &c) {
+    if (c.empty()) return Place::CASCADE;
+    return c.back().serialize();
+  }
+  static string name(char place) {
+    switch (place) {
+      case CASCADE: return "an empty cascade";
+      case RESERVE: return "an empty reserve";
+      case FOUNDATION: return "the foundation";
+    }
+    return "the " + Card::deserialize(place).str();
+  }
+};
+const string Move::kSentinel {4, 0};
+
+typedef vector<Move> IffyMoveList;
+struct MoveList : IffyMoveList {
+  u_set<string> board_states;
+  MoveList() {}
+  MoveList(const IffyMoveList& ml) {
+    reserve(ml.size());
+    for (const Move& m : ml) {
+      auto it = board_states.insert(m.board_state);
+      push_back(Move(*it.first, m));
+    }
+  }
+};
 
 struct Board {
   vector<Cascade> cascades {};
   vector<Card> reserve {};
   int foundation[4] {};
-  MoveList moves {};
-  
-  string tableau(size_t ind) const {
-    if (cascades[ind].empty()) {
-      return "Empty Cascade";
-    }
-    return cascades[ind].back().str();
-  }
+  IffyMoveList moves {};
   
   bool is_won() const {
-    for (const Cascade &c : cascades) {
-      if (c.size()) return false;
+    for (size_t i = 0; i < 4; ++i) {
+      if (foundation[i] < Card::Face::K) return false;
     }
-    return reserve.empty();
+    return true;
   }
   
   int heuristic() const {
-    return foundation[0] + foundation[1] + foundation[2] + foundation[3];
+    return (foundation[0] + foundation[1] + foundation[2] + foundation[3]) * 12
+        - moves.size();
+  }
+  
+  int completion() const {
+    return (foundation[0] + foundation[1] + foundation[2] + foundation[3])
+        * 100 / 52;
   }
   
   bool operator<(const Board& other) const {
@@ -148,14 +236,34 @@ struct Board {
     for (i = 0; i < 4; ++i) res[i] = foundation[i];
     for (const Cascade &c : cascades) {
       res[i++] = c.size();
-      for (Card r : c) res[i++] = r.suit * 16 + r.face;
+      for (Card r : c) res[i++] = r.serialize();
     }
     return res;
   }
   
-  bool operator==(const Board& b) const;
-  
-  unordered_set<Card> reserve_set() const;
+  static
+  Board deserialize(const string& str, const char (&reserve)[RESERVE_SIZE]) {
+    Board res;
+    if (str.length() < 4) return res;
+    
+    size_t i;
+    for (i = 0; i < 4; ++i)  res.foundation[i] = str[i];
+    while (i < str.length()) {
+      char count = str[i++];
+      res.cascades.push_back({});
+      for (int j = 0; j < count; ++j) {
+        if (i >= str.length()) abort();
+        res.cascades.back().push_back(Card::deserialize(str[i++]));
+      }
+    }
+    for (size_t r = 0; r < RESERVE_SIZE; ++r) {
+      if (reserve[r]) {
+        res.reserve.push_back(Card::deserialize(reserve[r]));
+      }
+    }
+    
+    return res;
+  }
   
   string desc() const {
     string res;
@@ -169,6 +277,35 @@ struct Board {
           continue;
         }
         line += " " + c[i].desc();
+        more = true;
+      }
+      if (more) res += line + "\n";
+    }
+    return res;
+  }
+  
+  string str() const {
+    string res;
+    for (size_t i = 0; i < RESERVE_SIZE; ++i) {
+      res += (i < reserve.size() ? reserve[i] : Card()).chr() + " ";
+    }
+    res += "       ";
+    for (size_t i = 0; i < 4; ++i) {
+      res += Card((Card::Face) foundation[i], (Card::Suit) i).chr() + " ";
+    }
+    res += "\n\n";
+    
+    bool more = true;
+    for (size_t i = 0; more; ++i) {
+      string line;
+      more = false;
+      for (const Cascade &c : cascades) {
+        if (i >= c.size()) {
+          line += line.empty() ? " " : "   ";
+          continue;
+        }
+        if (line.length()) line += "  ";
+        line += c[i].chr();
         more = true;
       }
       if (more) res += line + "\n";
@@ -197,6 +334,10 @@ struct Board {
   }
 };
 
+// =============================================================================
+// === Search Logic ============================================================
+// =============================================================================
+
 bool tableau_stackable(Card c, Card on_c) {
   return c.face == on_c.face + 1 && c.color() != on_c.color();
 }
@@ -214,7 +355,7 @@ Board reserve_to_tableau(const Board& b, size_t reserve, size_t cascade) {
   Board res = b;
   res.reserve.erase(res.reserve.begin() + reserve);
   res.cascades[cascade].push_back(b.reserve[reserve]);
-  res.moves.push_back(b.reserve[reserve].str() + " → " + b.tableau(cascade));
+  res.moves.push_back(Move(b.reserve[reserve], b.cascades[cascade]));
   return res;
 }
 
@@ -228,7 +369,7 @@ Board tableaux_move(const Board& b, size_t source, size_t dest) {
   Board res = b;
   res.cascades[source].pop_back();
   res.cascades[dest].push_back(b.cascades[source].back());
-  res.moves.push_back(b.tableau(source) + " → " + b.tableau(dest));
+  res.moves.push_back(Move(b.cascades[source], b.cascades[dest]));
   return res;
 }
 
@@ -236,7 +377,7 @@ Board tableau_to_reserve(const Board& b, size_t source) {
   Board res = b;
   res.cascades[source].pop_back();
   res.reserve.push_back(b.cascades[source].back());
-  res.moves.push_back(b.tableau(source) + " → Reserve");
+  res.moves.push_back(Move(b.cascades[source], Move::Place::RESERVE));
   return res;
 }
 
@@ -244,7 +385,7 @@ Board tableau_to_foundation(const Board& b, size_t source) {
   Board res = b;
   res.cascades[source].pop_back();
   res.foundation[b.cascades[source].back().suit]++;
-  res.moves.push_back(b.tableau(source) + " → Foundation");
+  res.moves.push_back(Move(b.cascades[source], Move::Place::FOUNDATION));
   return res;
 }
 
@@ -253,16 +394,26 @@ Board reserve_to_foundation(const Board& b, size_t reserve) {
   if (reserve >= b.reserve.size()) abort();
   res.reserve.erase(res.reserve.begin() + reserve);
   res.foundation[b.reserve[reserve].suit]++;
-  res.moves.push_back(b.reserve[reserve].str() + " → Foundation");
+  res.moves.push_back(Move(b.reserve[reserve], Move::Place::FOUNDATION));
   return res;
 }
 
-vector<Board> possible_moves(const Board &board) {
+void visit(vector<Board>& dest, Board&& b, u_set<string> &visited) {
+  auto ins = visited.insert(b.serialize());
+  if (ins.second) {
+    Move fixed(*ins.first, b.reserve, b.moves.back());
+    b.moves.pop_back();
+    b.moves.push_back(fixed);
+    dest.push_back(std::move(b));
+  }
+}
+
+vector<Board> possible_moves(const Board &board, u_set<string> &visited) {
   vector<Board> res;
   for (size_t i = 0; i < board.cascades.size(); ++i) {
     for (size_t j = 0; j < board.reserve.size(); ++j)  {
       if (reserve_to_tableau_valid(board, j, i)) {
-        res.push_back(reserve_to_tableau(board, j, i));
+        visit(res, reserve_to_tableau(board, j, i), visited);
       }
     }
     
@@ -270,22 +421,22 @@ vector<Board> possible_moves(const Board &board) {
 
     for (size_t j = 0; j < board.cascades.size(); ++j) {
       if (tableaux_move_valid(board, i, j)) {
-        res.push_back(tableaux_move(board, i, j));
+        visit(res, tableaux_move(board, i, j), visited);
       }
     }
     
     if (board.reserve.size() < RESERVE_SIZE)  {
-      res.push_back(tableau_to_reserve(board, i));
+      visit(res, tableau_to_reserve(board, i), visited);
     }
     
     if (foundation_can_accept(board, board.cascades[i].back())) {
-      res.push_back(tableau_to_foundation(board, i));
+      visit(res, tableau_to_foundation(board, i), visited);
     }
   }
   
   for (size_t i = 0; i < board.reserve.size(); ++i)  {
     if (foundation_can_accept(board, board.reserve[i])) {
-      res.push_back(reserve_to_foundation(board, i));
+      visit(res, reserve_to_foundation(board, i), visited);
     }
   }
   
@@ -297,40 +448,46 @@ MoveList solve(Board game) {
   search.push(game);
   int bno = 0, ino = 0;
   
-  unordered_set<string> visited_boards;
+  u_set<string> visited_boards;
   
+  int compp = 0;
   while (!search.empty()) {
     const Board &board = search.top();
-    const int heur = board.heuristic();
+    const int comp = board.completion();
     if (board.is_won()) {
+      cout << endl << "Solution found." << endl << endl;
       return board.moves;
     }
-    auto moves = possible_moves(board);
+    auto moves = possible_moves(board, visited_boards);
     search.pop();
     for (auto &move : moves) {
       if (!(++bno & 0xFFFF)) {
         cout << endl << "Arbitrary board:" << endl << move.desc() << endl << endl;
       }
-      if (!visited_boards.insert(move.serialize()).second) {
-        continue;
-      }
       search.push(std::move(move));
     }
-    if (!(ino++ & 0xFF)) {
-      cout << "Searching space of " << search.size() << " boards with top heuristic at " << heur << "...\n";
+    if (!(ino++ & 0x1FF) || comp > compp) {
+      cout << "Searching space of " << search.size()
+           << "/" << visited_boards.size() << " boards; maybe " << comp
+           << "% done...\r";
+      compp = comp;
     }
-    if (search.size() > 300000) {
+    if (search.size() > GC_UPPER_BOUND) {
+      // This operation is an abomination that exists because priority_queue
+      // is grossly underpowered, and I'm too lazy to use to a set.
       cout << endl <<  "Collecting some garbage..." << endl;
-      priority_queue<Board> garbaj;
-      while (garbaj.size() < 200000) {
-        garbaj.push(search.top());
+      priority_queue<Board> garbage;
+      while (garbage.size() < GC_LOWER_BOUND) {
+        garbage.push(search.top());
         search.pop();
       }
-      search.swap(garbaj);
+      search.swap(garbage);
     }
   }
+  cout << endl << "Search space exhausted." << endl << endl;
   return {};
 }
+
 
 
 int main() {
@@ -344,17 +501,14 @@ int main() {
     ": 4S TC 4D QH 4C 3C 5C 6S"
     ": 9H 4H 5S 7S"
   };
-  cout << "Will solve " << game.desc() << endl << endl;
-  cout << "C: " << Card("4H").color() << endl;
-  cout << "C: " << Card("5S").color() << endl;
-  cout << "C: " << Card("6D").color() << endl;
-  cout << "C: " << Card("7C").color() << endl;
-  cout << "C: " << Card("3H").color() << endl;
-  cout << "C: " << Card("4S").color() << endl;
-  cout << "C: " << Card("5D").color() << endl;
-  cout << "C: " << Card("6C").color() << endl;
+  cout << "Will solve " << endl << game.str() << endl << endl;
+  
   MoveList winning_moves = solve(game);
-  for (string move : winning_moves) cout << move << endl;
+  for (const Move &move : winning_moves) {
+    cout << Board::deserialize(move.board_state, move.reserve).str() << endl;
+    cout << move.str() << endl;
+    std::cin.get();
+  }
   if (winning_moves.empty()) {
     cerr << "Solution could not be found." << endl;
     return 1;
