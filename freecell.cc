@@ -1,5 +1,6 @@
 #include <cstdlib>
 #include <deque>
+#include <fstream>
 #include <iostream>
 #include <queue>
 #include <string>
@@ -488,20 +489,37 @@ MoveList solve(Board game) {
   return {};
 }
 
+// This game was so hard, I wrote this program.
+const string kSampleGame =
+    ": 6C 9S 2H AC JD AS 9C 7H\n"
+    ": 2D AD QC KD JC JS 3D 2C\n"
+    ": KC TD 7D 9D QD TS 6D 6H\n"
+    ": 8S TH 3H KS 2S QS 8C KH\n"
+    ": AH JH 7C 8H 5H 8D 5D 3S\n"
+    ": 4S TC 4D QH 4C 3C 5C 6S\n"
+    ": 9H 4H 5S 7S";
 
-
-int main() {
-  cout << "Parse board..." << endl;
-  Board game {
-    ": 6C 9S 2H AC JD AS 9C 7H"
-    ": 2D AD QC KD JC JS 3D 2C"
-    ": KC TD 7D 9D QD TS 6D 6H"
-    ": 8S TH 3H KS 2S QS 8C KH"
-    ": AH JH 7C 8H 5H 8D 5D 3S"
-    ": 4S TC 4D QH 4C 3C 5C 6S"
-    ": 9H 4H 5S 7S"
-  };
-  cout << "Will solve " << endl << game.str() << endl << endl;
+int main(int argc, char* argv[]) {
+  if (argc != 2) {
+    cout << "Usage: " << argv[0] << " <game_file>" << endl << endl;
+    cout << "Game file should look something like this:" << endl;
+    cout << kSampleGame << endl << endl;
+    cout << "Note that the colons are optional, but the game data isn't.\n"
+         "You may use numbers in place of 'A', 'T', 'J', 'Q', and 'K'." << endl;
+    return 0;
+  }
+  
+  string fname = argv[1];
+  cout << "Parsing board from \"" << fname << "\"..." << endl;
+  
+  std::ifstream game_file(fname);
+  string game_desc { std::istreambuf_iterator<char>(game_file),
+                     std::istreambuf_iterator<char>() };
+  cout << "Read the following game descriptor:" << endl << game_desc;
+  
+  Board game { game_desc };
+  cout << "Evaluates as the following board:" << endl << game.str()
+       << endl << endl;
   
   MoveList winning_moves = solve(game);
   for (const Move &move : winning_moves) {
