@@ -139,6 +139,20 @@ struct Board {
     return heuristic() < other.heuristic();
   }
   
+  string serialize() const {
+    size_t len = 4 + cascades.size();
+    for (const Cascade &c : cascades) len += c.size();
+    string res(len, 0);
+    
+    size_t i;
+    for (i = 0; i < 4; ++i) res[i] = foundation[i];
+    for (const Cascade &c : cascades) {
+      res[i++] = c.size();
+      for (Card r : c) res[i++] = r.suit * 16 + r.face;
+    }
+    return res;
+  }
+  
   bool operator==(const Board& b) const;
   
   unordered_set<Card> reserve_set() const;
@@ -183,85 +197,23 @@ struct Board {
   }
 };
 
-
-namespace std {
-  template<> struct hash<::Card> {
-    typedef ::Card argument_type;
-    typedef char result_type;
-    result_type operator()(argument_type const& c) const {
-      return c.suit << 4 | c.face;
-    }
-  };
-  
-  template<> struct hash<deque<::Card>> {
-    typedef deque<::Card> argument_type;
-    typedef std::size_t result_type;
-    result_type operator()(argument_type const& vc) const {
-      result_type res = 0;
-      for (const ::Card &c : vc) {
-        res = (res << 7) | (res >> 57);
-        res ^= c.suit << 4 | c.face;
-      }
-      return res;
-    }
-  };
-
-  template<typename T> struct hash<vector<T>> {
-    typedef vector<T> argument_type;
-    typedef std::size_t result_type;
-    result_type operator()(argument_type const& vt) const {
-      result_type res = 0;
-      std::hash<T> ehasher;
-      for (const T &t : vt) {
-        res = (res << 9) | (res >> 55);
-        res ^= ehasher(t);
-      }
-      return res;
-    }
-  };
-  
-  template<> struct hash<::Board> {
-    typedef ::Board argument_type;
-    typedef std::size_t result_type;
-    result_type operator()(argument_type const& b) const {
-      result_type h1 = hash<vector<Cascade>>{}(b.cascades);
-      result_type h2 = hash<vector<Card>>{}(b.reserve);
-      // result_type const h2(std::hash<vector<Card>>{}(b.reserve));
-      result_type h3 = b.foundation[0];
-      h3 = (h3 << 8) ^ b.foundation[1];
-      h3 = (h3 << 8) ^ b.foundation[2];
-      h3 = (h3 << 8) ^ b.foundation[3];
-      return h1 ^ (h2 << 1) ^ (h3 << 16);
-    }
-  };
-}
-
-unordered_set<Card> Board::reserve_set() const {
-  unordered_set<Card> res;
-  for (auto& x : reserve)
-    res.insert(x);
-  return res;
-}
-
-bool Board::operator==(const Board& b) const {
-  return cascades == b.cascades && reserve_set() == b.reserve_set() && foundation == b.foundation;
-}
-
 bool tableau_stackable(Card c, Card on_c) {
   return c.face == on_c.face + 1 && c.color() != on_c.color();
 }
 
 bool foundation_can_accept(const Board& b, Card c) {
-  if (c.face == Card::Face::A) {
-    cout << endl << "Yes! OMG!! This is a 1: " << (b.foundation[c.suit] == c.face - 1) << endl;
-  }
   return b.foundation[c.suit] == c.face - 1;
+}
+
+bool reserve_to_tableau_valid(const Board& b, size_t reserve, size_t cascade) {
+  if (b.cascades[cascade].empty()) return true;
+  return tableau_stackable(b.cascades[cascade].back(), b.reserve[reserve]);
 }
 
 Board reserve_to_tableau(const Board& b, size_t reserve, size_t cascade) {
   Board res = b;
-  res.cascades[cascade].push_back(b.reserve[reserve]);
   res.reserve.erase(res.reserve.begin() + reserve);
+  res.cascades[cascade].push_back(b.reserve[reserve]);
   res.moves.push_back(b.reserve[reserve].str() + " → " + b.tableau(cascade));
   return res;
 }
@@ -284,7 +236,7 @@ Board tableau_to_reserve(const Board& b, size_t source) {
   Board res = b;
   res.cascades[source].pop_back();
   res.reserve.push_back(b.cascades[source].back());
-  res.moves.push_back(b.tableau(source) + " → Empty Resrve");
+  res.moves.push_back(b.tableau(source) + " → Reserve");
   return res;
 }
 
@@ -298,8 +250,9 @@ Board tableau_to_foundation(const Board& b, size_t source) {
 
 Board reserve_to_foundation(const Board& b, size_t reserve) {
   Board res = b;
+  if (reserve >= b.reserve.size()) abort();
   res.reserve.erase(res.reserve.begin() + reserve);
-  res.foundation[b.cascades[reserve].back().suit]++;
+  res.foundation[b.reserve[reserve].suit]++;
   res.moves.push_back(b.reserve[reserve].str() + " → Foundation");
   return res;
 }
@@ -308,7 +261,9 @@ vector<Board> possible_moves(const Board &board) {
   vector<Board> res;
   for (size_t i = 0; i < board.cascades.size(); ++i) {
     for (size_t j = 0; j < board.reserve.size(); ++j)  {
-      res.push_back(reserve_to_tableau(board, j, i));
+      if (reserve_to_tableau_valid(board, j, i)) {
+        res.push_back(reserve_to_tableau(board, j, i));
+      }
     }
     
     if (board.cascades[i].empty()) continue;
@@ -340,9 +295,9 @@ vector<Board> possible_moves(const Board &board) {
 MoveList solve(Board game) {
   priority_queue<Board> search;
   search.push(game);
-  int bno = 0;
+  int bno = 0, ino = 0;
   
-  unordered_set<Board> visited_boards;
+  unordered_set<string> visited_boards;
   
   while (!search.empty()) {
     const Board &board = search.top();
@@ -356,14 +311,23 @@ MoveList solve(Board game) {
       if (!(++bno & 0xFFFF)) {
         cout << endl << "Arbitrary board:" << endl << move.desc() << endl << endl;
       }
-      if (!visited_boards.insert(move).second) {
-        cout << "Pruned a previously-visited board from search space!" << endl;
+      if (!visited_boards.insert(move.serialize()).second) {
         continue;
       }
       search.push(std::move(move));
     }
-    cout << "Searching space of " << search.size() << " boards with top heuristic at " << heur << "...\r";
-    if (bno > 300000) break;
+    if (!(ino++ & 0xFF)) {
+      cout << "Searching space of " << search.size() << " boards with top heuristic at " << heur << "...\n";
+    }
+    if (search.size() > 300000) {
+      cout << endl <<  "Collecting some garbage..." << endl;
+      priority_queue<Board> garbaj;
+      while (garbaj.size() < 200000) {
+        garbaj.push(search.top());
+        search.pop();
+      }
+      search.swap(garbaj);
+    }
   }
   return {};
 }
