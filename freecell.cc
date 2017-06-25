@@ -25,7 +25,7 @@ struct Card {
   
   string str() const {
     static string names[] = {
-      "ERR", "Ace", "One", "Two", "Three", "Four", "Five", "Six", "Seven",
+      "ERR", "Ace", "Two", "Three", "Four", "Five", "Six", "Seven",
       "Eight", "Nine", "Ten", "Jack", "Queen", "King" 
     };
     static string suits[] = { "Spades", "Hearts", "Diamonds", "Clubs" };
