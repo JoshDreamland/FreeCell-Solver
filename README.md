@@ -6,7 +6,13 @@ Jesus.
 
 ## Building
 
-Try something like this:
+This project isn't hard to build. I recommend the following line:
+
+```
+g++ freecell.cc -O3 -s -DUSE_CURSES -lncurses
+```
+
+But if you don't have ncurses, you can build it the old-fashioned way:
 
 ```
 g++ freecell.cc -O3 -s
@@ -21,12 +27,18 @@ compiler is sort of old, you may need `--std=c++11` or the like.
 Put your game data in a file and call the solver on it like this:
 
 ```
-freecell game.dat
+freecell game.dat --interactive
 ```
+
+The `--interactive` flag is optional; it will walk you through moves visually
+rather than just vomiting out instructions.
+
+If you would like the boards rendered without interactivity, you can pass
+the `--print_boards` flag instead.
 
 ## Game Data
 
-As the program will tell you, it looks like this:
+As the program will tell you, input is formatted like this:
 
 ```
 : 6C 9S 2H AC JD AS 9C 7H
@@ -43,10 +55,27 @@ Comments in this file are not supported.
 
 ## Output
 
-This project uses unicode.
+Without interactivity enabled, the default output looks like this:
 
-![Example instruction screenshot](http://i.imgur.com/Mr46aZv.png)
+```
+Move the Nine of Hearts onto an empty reserve
+Move the Four of Spades onto an empty reserve
+Move the Ace of Hearts onto the foundation
+Move the Five of Spades onto an empty reserve
+Move the Three of Clubs onto the Four of Hearts
+ . . .
+Move the King of Diamonds onto the foundation
+Move the Queen of Clubs onto the foundation
+Move the King of Clubs onto the foundation
+```
 
-It prints this a lot, prompting for enter after each instruction.
-You can change this behavior by editing the output loop under "main"
-and possibly by revising `Move::str()` to output in your desired format.
+Printing boards (or running in non-curses interactive mode), the output
+looks like this:
+
+![Board print output](http://i.imgur.com/KRTLs3C.png)
+
+Running in curses interactive mode, the output is controlled using the mouse
+wheel or arrow keys, and display can be terminated at any time using 'Q'.
+The output looks like this:
+
+![Curses interface](http://i.imgur.com/NNmZufP.png)

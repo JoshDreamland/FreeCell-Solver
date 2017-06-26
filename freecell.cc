@@ -7,6 +7,13 @@
 #include <unordered_set>
 #include <vector>
 
+#ifdef USE_CURSES
+constexpr bool kUseCurses = true;
+#include <ncurses.h>
+#else
+constexpr bool kUseCurses = false;
+#endif
+
 using std::cerr;
 using std::cout;
 using std::deque;
@@ -21,7 +28,11 @@ using u_set = std::unordered_set<K...>;
 constexpr size_t RESERVE_SIZE = 4; // Number of reserve slots.
 constexpr size_t GC_UPPER_BOUND = 600000; // Maximum search space.
 constexpr size_t GC_LOWER_BOUND = 300000; // Search space prune length.
-
+constexpr size_t HEURISTIC_GREED = 12; // Heuristic bias toward foundation count.
+                                       // Smaller values consume more resource,
+                                       // but produce better solutions. With a
+                                       // greed weight of zero, the algorithm
+                                       // behaves as if there were no priority.
 
 // =============================================================================
 // === Representation ==========================================================
@@ -215,8 +226,8 @@ struct Board {
   }
   
   int heuristic() const {
-    return (foundation[0] + foundation[1] + foundation[2] + foundation[3]) * 12
-        - moves.size();
+    return (foundation[0] + foundation[1] + foundation[2] + foundation[3])
+        * HEURISTIC_GREED - moves.size();
   }
   
   int completion() const {
@@ -339,6 +350,10 @@ struct Board {
 // === Search Logic ============================================================
 // =============================================================================
 
+template<int greed> struct SQT { typedef priority_queue<Board> SearchQueue; };
+template<> struct SQT<0> { typedef std::queue<Board> SearchQueue; };
+typedef SQT<HEURISTIC_GREED>::SearchQueue SearchQueue;
+
 bool tableau_stackable(Card c, Card on_c) {
   return c.face == on_c.face + 1 && c.color() != on_c.color();
 }
@@ -445,7 +460,7 @@ vector<Board> possible_moves(const Board &board, u_set<string> &visited) {
 }
 
 MoveList solve(Board game) {
-  priority_queue<Board> search;
+  SearchQueue search;
   search.push(game);
   int bno = 0, ino = 0;
   
@@ -477,7 +492,7 @@ MoveList solve(Board game) {
       // This operation is an abomination that exists because priority_queue
       // is grossly underpowered, and I'm too lazy to use to a set.
       cout << endl <<  "Collecting some garbage..." << endl;
-      priority_queue<Board> garbage;
+     SearchQueue garbage;
       while (garbage.size() < GC_LOWER_BOUND) {
         garbage.push(search.top());
         search.pop();
@@ -499,20 +514,43 @@ const string kSampleGame =
     ": 4S TC 4D QH 4C 3C 5C 6S\n"
     ": 9H 4H 5S 7S";
 
+int usage(int status, const char* prg) {
+  cout << "Usage: " << prg << " <game_file>"
+          " [--interactive] [--print_boards]\n" << endl;
+  cout << "Game file should look something like this:" << endl;
+  cout << kSampleGame << endl << endl;
+  cout << "Note that the colons are optional, but the game data isn't.\n"
+      "You may use numbers in place of 'A', 'T', 'J', 'Q', and 'K'." << endl;
+  return status;
+}
+
 int main(int argc, char* argv[]) {
-  if (argc != 2) {
-    cout << "Usage: " << argv[0] << " <game_file>" << endl << endl;
-    cout << "Game file should look something like this:" << endl;
-    cout << kSampleGame << endl << endl;
-    cout << "Note that the colons are optional, but the game data isn't.\n"
-         "You may use numbers in place of 'A', 'T', 'J', 'Q', and 'K'." << endl;
-    return 0;
+  if (argc < 2) {
+    return usage(0, *argv);
   }
   
-  string fname = argv[1];
-  cout << "Parsing board from \"" << fname << "\"..." << endl;
+  string fname;
+  bool interactive = false;
+  bool print_boards = false;
   
+  for (int i = 1; i < argc; ++i) {
+    if (argv[i][0] == '-') {
+      string arg = argv[i] + 1 + (argv[i][1] == '-');
+      if (arg == "interactive") { interactive = true; continue; }
+      if (arg == "print_boards") { print_boards = true; continue; }
+      cerr << "Unknown flag `" << argv[i] << "'" << endl;
+      return usage(1, *argv);
+    } else {
+      if (fname.empty()) fname = argv[i];
+    }
+  }
+  
+  cout << "Parsing board from \"" << fname << "\"..." << endl;
   std::ifstream game_file(fname);
+  if (!game_file) {
+    cerr << "Failed to open input file." << endl;
+    return 2;
+  }
   string game_desc { std::istreambuf_iterator<char>(game_file),
                      std::istreambuf_iterator<char>() };
   cout << "Read the following game descriptor:" << endl << game_desc;
@@ -522,11 +560,77 @@ int main(int argc, char* argv[]) {
        << endl << endl;
   
   MoveList winning_moves = solve(game);
-  for (const Move &move : winning_moves) {
-    cout << Board::deserialize(move.board_state, move.reserve).str() << endl;
-    cout << move.str() << endl;
-    std::cin.get();
+  
+  if (!interactive || !kUseCurses) {
+    for (const Move &move : winning_moves) {
+      if (interactive || print_boards) {
+        cout << (interactive ? "\n" : "\n\n")
+             << Board::deserialize(move.board_state, move.reserve).str()
+             << endl;
+      }
+      cout << move.str() << endl;
+      if (interactive) std::cin.get();
+    }
+  } else {
+#   ifndef USE_CURSES
+      cerr << "Logic error." << endl; abort();
+#   else
+      setlocale(LC_ALL, "");
+      initscr(); cbreak(); noecho();
+      nonl();
+      intrflush(stdscr, FALSE);
+      keypad(stdscr, TRUE);
+      curs_set(FALSE);
+      
+      int boardwidth = 8 + 7 + 8, boardheight = 0, textwidth = 0;
+      for (const Move &move : winning_moves) {
+        int hgt = 0;
+        Board b = Board::deserialize(move.board_state, move.reserve);
+        for (const Cascade& c : b.cascades) {
+          hgt = std::max(hgt, (int) c.size());
+        }
+        boardheight = std::max(hgt, boardheight );
+        boardwidth  = std::max((int) b.cascades.size(), boardwidth);
+        textwidth   = std::max((int) move.str().length(), textwidth);
+      }
+      boardheight += 2;
+      
+      for (auto at = winning_moves.begin(); ; ) {
+        clear();
+        if (at == winning_moves.end()) {
+          string inst = "Press 'Q' to quit.";
+          mvaddstr(boardheight + 2, (COLS - inst.length()) / 2, inst.c_str());
+        } else {
+          const Move& move = *at;
+          string board_str =
+              Board::deserialize(move.board_state, move.reserve).str();
+          std::basic_string<unsigned int> w(board_str.begin(), board_str.end());
+          
+          int pcs = 0;
+          for (size_t ln = 1, f = 0, nl = board_str.find('\n');;
+               ++ln, f = nl + 1, nl = board_str.find('\n', f)) {
+            string substr = board_str.substr(f, nl - f);
+            mvwprintw(stdscr, ln, (COLS - boardwidth) / 2, substr.c_str());
+            ++pcs;
+            if (nl == string::npos) break;
+          }
+          string inst = move.str();
+          mvaddstr(boardheight + 2, (COLS - inst.length()) / 2, inst.c_str());
+        }
+        
+        int c = getch();
+        if (c == KEY_UP || c == KEY_LEFT || c == KEY_BACKSPACE) {
+          if (at != winning_moves.begin()) at--;
+        }
+        else if (c == KEY_DOWN || c == KEY_RIGHT || c == KEY_ENTER || c == ' ') {
+          if (at != winning_moves.end()) at++;
+        }
+        else if (c == 'Q' || c == 'q') break;
+      }
+      endwin();
+#   endif
   }
+  
   if (winning_moves.empty()) {
     cerr << "Solution could not be found." << endl;
     return 1;
