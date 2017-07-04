@@ -2,6 +2,7 @@
 #include <deque>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <queue>
 #include <string>
 #include <unordered_set>
@@ -328,8 +329,9 @@ struct Board {
   Board() {}
   Board(string desc) {
     size_t cascade = 0;
+    std::map<char, int> read_cards;
     for (size_t i = 0; i < desc.length(); ) {
-      while (i < desc.length() && std::isspace(desc[i])) ++i;
+      while (i < desc.length() && (desc[i] == ' ' || desc[i] == '\t')) ++i;
       if (i >= desc.length()) break;
       
       if (desc[i] == ':' || desc[i] == '\r' || desc[i] == '\n') {
@@ -341,7 +343,36 @@ struct Board {
       while (i < desc.length() && !std::isspace(desc[i]) && desc[i] != ':') ++i;
       string card_desc = desc.substr(f, i - f);
       if (cascade >= cascades.size()) cascades.push_back({});
-      cascades[cascade++].push_back(Card(card_desc));
+      
+      Card card(card_desc);
+      cascades[cascade++].push_back(card);
+      ++read_cards[card.serialize()];
+    }
+    if (read_cards.size() != 52) {
+      cerr << "WARNING: input does not contain all 52 card faces." << endl;
+      for (int s = 0; s < 4; ++s) {
+        for (int f = Card::Face::A; f <= Card::Face::K; ++f) {
+          Card card((Card::Face) f, (Card::Suit) s);
+          if (read_cards.find(card.serialize()) == read_cards.end()) {
+            cerr << "- Missing " << card.str() << endl;
+          }
+        }
+      }
+    }
+    std::map<int, int> count_counts;
+    for (auto cn : read_cards) ++count_counts[cn.second];
+    if (count_counts.size() > 1) {
+      cerr << "WARNING: Some cards appear more frequently than others." << endl;
+      for (auto &ccr : count_counts) {
+        if (ccr.second < 26) {
+          cerr << "- The following cards appear " << ccr.first << " times:\n";
+          for (auto &cn : read_cards) {
+            if (cn.second == ccr.first) {
+              cerr << "  > " << Card::deserialize(cn.first).str() << endl;
+            }
+          }
+        }
+      }
     }
   }
 };
@@ -351,7 +382,9 @@ struct Board {
 // =============================================================================
 
 template<int greed> struct SQT { typedef priority_queue<Board> SearchQueue; };
-template<> struct SQT<0> { typedef std::queue<Board> SearchQueue; };
+template<> struct SQT<0> { struct SearchQueue: std::queue<Board> {
+  const Board &top() { return front(); }
+}; };
 typedef SQT<HEURISTIC_GREED>::SearchQueue SearchQueue;
 
 bool tableau_stackable(Card c, Card on_c) {
@@ -478,7 +511,7 @@ MoveList solve(Board game) {
     search.pop();
     for (auto &move : moves) {
       if (!(++bno & 0xFFFF)) {
-        cout << endl << "Arbitrary board:" << endl << move.desc() << endl << endl;
+        cout << endl << "Arbitrary board:" << endl << move.str() << endl << endl;
       }
       search.push(std::move(move));
     }
