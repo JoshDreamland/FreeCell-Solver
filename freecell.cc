@@ -26,14 +26,33 @@ using std::vector;
 template<typename... K>
 using u_set = std::unordered_set<K...>;
 
-constexpr size_t RESERVE_SIZE = 4; // Number of reserve slots.
+constexpr size_t RESERVE_SIZE = 3; // Number of reserve slots.
 constexpr size_t GC_UPPER_BOUND = 600000; // Maximum search space.
 constexpr size_t GC_LOWER_BOUND = 300000; // Search space prune length.
-constexpr size_t HEURISTIC_GREED = 12; // Heuristic bias toward foundation count.
-                                       // Smaller values consume more resource,
-                                       // but produce better solutions. With a
-                                       // greed weight of zero, the algorithm
-                                       // behaves as if there were no priority.
+
+// Heuristic weights
+constexpr size_t HEURISTIC_GREED = 32;
+constexpr size_t MOVE_PUNISHMENT = 8;
+constexpr size_t INACCESSIBILITY_PUNISHMENT = 64;
+constexpr size_t TABLEAU_REWARD = 4;
+
+// HEURISTIC_GREED
+//   Heuristic bias toward number of cards in the foundation.
+//   Smaller values consume more resource, but produce better solutions. With a
+//   greed weight of zero, the algorithm behaves as if there were no priority.
+//
+// MOVE_PUNISHMENT
+//   Heuristic deduction for each move taken. Higher values produce shorter
+//   solutions, at the cost of widening the search space.
+//
+// INACCESSIBILITY_PUNISHMENT
+//   Heuristic cost of having high-value cards stacked on top of low-value
+//   cards. Higher values will make the play more human-like, for better or
+//   for worse.
+//
+// TABLEAU_REWARD
+//   Complementary to INACCESSIBILITY_PUNISHMENT, this value rewards having
+//   larger stacks of decreasing card ranks.
 
 // =============================================================================
 // === Representation ==========================================================
@@ -227,8 +246,21 @@ struct Board {
   }
   
   int heuristic() const {
-    return (foundation[0] + foundation[1] + foundation[2] + foundation[3])
-        * HEURISTIC_GREED - moves.size();
+    int heur = (foundation[0] + foundation[1] + foundation[2] + foundation[3])
+        * HEURISTIC_GREED;
+    
+    for (const Cascade &c: cascades) {
+      for (size_t i = 1; i < c.size(); ++i) {
+        if (c[i].face > c[i-1].face) {
+          heur -= (1 + c.size() - i) * INACCESSIBILITY_PUNISHMENT;
+        } else {
+          heur += TABLEAU_REWARD;
+        }
+      }
+    }
+    
+    heur -= moves.size() * MOVE_PUNISHMENT;
+    return heur;
   }
   
   int completion() const {
@@ -381,10 +413,17 @@ struct Board {
 // === Search Logic ============================================================
 // =============================================================================
 
-template<int greed> struct SQT { typedef priority_queue<Board> SearchQueue; };
-template<> struct SQT<0> { struct SearchQueue: std::queue<Board> {
-  const Board &top() { return front(); }
-}; };
+template<int greed> struct SQT {
+  struct SearchQueue: priority_queue<Board> {
+    void pop_back() { c.pop_back(); }
+  };
+};
+template<> struct SQT<0> {
+  struct SearchQueue: std::queue<Board> {
+    const Board &top() { return front(); }
+    void pop_back() { c.pop_back(); }
+  };
+};
 typedef SQT<HEURISTIC_GREED>::SearchQueue SearchQueue;
 
 bool tableau_stackable(Card c, Card on_c) {
@@ -438,6 +477,24 @@ Board tableau_to_foundation(const Board& b, size_t source) {
   return res;
 }
 
+bool foundation_to_tableau_valid(
+    const Board& board, size_t foundation, size_t cascade) {
+  if (!board.foundation[foundation]) return false;
+  if (board.cascades[cascade].empty()) return true;
+  Card onto = board.cascades[cascade].back();
+  if (Card::color((Card::Suit) foundation) == onto.color()) return false;
+  return board.foundation[foundation] == onto.face - 1;
+}
+
+Board foundation_to_tableau(const Board& b, size_t foundation, size_t cascade) {
+  Board res = b;
+  Card fcard((Card::Face) b.foundation[foundation], (Card::Suit) foundation);
+  --res.foundation[foundation];
+  res.cascades[cascade].push_back(fcard);
+  res.moves.push_back(Move(fcard, b.cascades[cascade]));
+  return res;
+}
+
 Board reserve_to_foundation(const Board& b, size_t reserve) {
   Board res = b;
   if (reserve >= b.reserve.size()) abort();
@@ -481,6 +538,12 @@ vector<Board> possible_moves(const Board &board, u_set<string> &visited) {
     if (foundation_can_accept(board, board.cascades[i].back())) {
       visit(res, tableau_to_foundation(board, i), visited);
     }
+    
+    for (size_t j = 0; j < 4; ++j) {
+      if (foundation_to_tableau_valid(board, j, i)) {
+        visit(res, foundation_to_tableau(board, j, i), visited);
+      }
+    }
   }
   
   for (size_t i = 0; i < board.reserve.size(); ++i)  {
@@ -503,6 +566,7 @@ MoveList solve(Board game) {
   while (!search.empty()) {
     const Board &board = search.top();
     const int comp = board.completion();
+    const int nmoves = board.moves.size();
     if (board.is_won()) {
       cout << endl << "Solution found." << endl << endl;
       return board.moves;
@@ -516,21 +580,13 @@ MoveList solve(Board game) {
       search.push(std::move(move));
     }
     if (!(ino++ & 0x1FF) || comp > compp) {
-      cout << "Searching space of " << search.size()
-           << "/" << visited_boards.size() << " boards; maybe " << comp
-           << "% done...\r";
+      cout << "Searched " << ino << " boards [" << search.size()
+           << ":" << visited_boards.size() << "]; " << nmoves << " ply; maybe "
+           << comp << "%...\r";
       compp = comp;
     }
-    if (search.size() > GC_UPPER_BOUND) {
-      // This operation is an abomination that exists because priority_queue
-      // is grossly underpowered, and I'm too lazy to use to a set.
-      cout << endl <<  "Collecting some garbage..." << endl;
-     SearchQueue garbage;
-      while (garbage.size() < GC_LOWER_BOUND) {
-        garbage.push(search.top());
-        search.pop();
-      }
-      search.swap(garbage);
+    while (search.size() > GC_UPPER_BOUND) {
+      search.pop_back();
     }
   }
   cout << endl << "Search space exhausted." << endl << endl;
@@ -604,7 +660,7 @@ int main(int argc, char* argv[]) {
       cout << move.str() << endl;
       if (interactive) std::cin.get();
     }
-  } else {
+  } else if (winning_moves.size()) {
 #   ifndef USE_CURSES
       cerr << "Logic error." << endl; abort();
 #   else
