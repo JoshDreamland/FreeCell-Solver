@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdlib>
 #include <deque>
 #include <fstream>
@@ -5,7 +6,9 @@
 #include <map>
 #include <queue>
 #include <string>
+#include <tuple>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 #ifdef USE_CURSES
@@ -27,8 +30,7 @@ template<typename... K>
 using u_set = std::unordered_set<K...>;
 
 constexpr size_t RESERVE_SIZE = 3; // Number of reserve slots.
-constexpr size_t GC_UPPER_BOUND = 600000; // Maximum search space.
-constexpr size_t GC_LOWER_BOUND = 300000; // Search space prune length.
+constexpr size_t GC_UPPER_BOUND = 1200000; // Maximum search space.
 
 // Heuristic weights
 constexpr size_t HEURISTIC_GREED = 32;
@@ -38,8 +40,7 @@ constexpr size_t TABLEAU_REWARD = 4;
 
 // HEURISTIC_GREED
 //   Heuristic bias toward number of cards in the foundation.
-//   Smaller values consume more resource, but produce better solutions. With a
-//   greed weight of zero, the algorithm behaves as if there were no priority.
+//   Smaller values consume more resource, but produce better solutions.
 //
 // MOVE_PUNISHMENT
 //   Heuristic deduction for each move taken. Higher values produce shorter
@@ -53,6 +54,18 @@ constexpr size_t TABLEAU_REWARD = 4;
 // TABLEAU_REWARD
 //   Complementary to INACCESSIBILITY_PUNISHMENT, this value rewards having
 //   larger stacks of decreasing card ranks.
+
+#define NONNULL(ref) non_null(ref, #ref, __func__, __FILE__, __LINE__)
+#define NON_NULL(ref, entity) non_null(ref, entity, __func__, __FILE__, __LINE__)
+template<typename T> T* non_null(T* ref, const char* entity,
+    const char* funcname, const char* filename, size_t lineno) {
+  if (!ref) {
+    cerr << "Internal error: null " << entity << " ("
+         << funcname << "@" << filename << ":" << lineno << "). Abort." << endl;
+    abort();
+  }
+  return ref;
+}
 
 // =============================================================================
 // === Representation ==========================================================
@@ -171,72 +184,10 @@ struct Card {
 
 typedef deque<Card> Cascade;
 
-struct Move {
-  enum Place : char { CASCADE = -3, RESERVE = -2, FOUNDATION = -1 };
-  const string& board_state;
-  char source;
-  char dest;
-  char reserve[RESERVE_SIZE] {};
-  
-  static const string kSentinel;
-
-  string str() const {
-    return "Move " + name(source) + " onto " + name(dest);
-  }
-
-  Move(Card c, Card d):
-      board_state(kSentinel), source(c.serialize()), dest(d.serialize()) {}
-  Move(Card c, Place p):
-      board_state(kSentinel), source(c.serialize()), dest(p) {}
-  Move(Card c, const Cascade &d):
-      board_state(kSentinel), source(c.serialize()), dest(place(d)) {}
-  Move(const Cascade &c, const Cascade &d):
-      board_state(kSentinel), source(c.back().serialize()), dest(place(d)) {}
-  Move(const Cascade &c, Place p):
-      board_state(kSentinel), source(c.back().serialize()), dest(p) {}
-  Move(const string& b, const Move& m):
-      board_state(b), source(m.source), dest(m.dest) {
-    for (size_t i = 0; i < RESERVE_SIZE; ++i) reserve[i] = m.reserve[i];
-  }
-  Move(const string& b, const vector<Card> &r, const Move& m):
-      board_state(b), source(m.source), dest(m.dest) {
-    for (size_t i = 0; i < r.size(); ++i) reserve[i] = r[i].serialize();
-  }
-  
- private:
-  static char place(const Cascade &c) {
-    if (c.empty()) return Place::CASCADE;
-    return c.back().serialize();
-  }
-  static string name(char place) {
-    switch (place) {
-      case CASCADE: return "an empty cascade";
-      case RESERVE: return "an empty reserve";
-      case FOUNDATION: return "the foundation";
-    }
-    return "the " + Card::deserialize(place).str();
-  }
-};
-const string Move::kSentinel {4, 0};
-
-typedef vector<Move> IffyMoveList;
-struct MoveList : IffyMoveList {
-  u_set<string> board_states;
-  MoveList() {}
-  MoveList(const IffyMoveList& ml) {
-    reserve(ml.size());
-    for (const Move& m : ml) {
-      auto it = board_states.insert(m.board_state);
-      push_back(Move(*it.first, m));
-    }
-  }
-};
-
 struct Board {
   vector<Cascade> cascades {};
   vector<Card> reserve {};
   int foundation[4] {};
-  IffyMoveList moves {};
   
   bool is_won() const {
     for (size_t i = 0; i < 4; ++i) {
@@ -245,31 +196,9 @@ struct Board {
     return true;
   }
   
-  int heuristic() const {
-    int heur = (foundation[0] + foundation[1] + foundation[2] + foundation[3])
-        * HEURISTIC_GREED;
-    
-    for (const Cascade &c: cascades) {
-      for (size_t i = 1; i < c.size(); ++i) {
-        if (c[i].face > c[i-1].face) {
-          heur -= (1 + c.size() - i) * INACCESSIBILITY_PUNISHMENT;
-        } else {
-          heur += TABLEAU_REWARD;
-        }
-      }
-    }
-    
-    heur -= moves.size() * MOVE_PUNISHMENT;
-    return heur;
-  }
-  
   int completion() const {
     return (foundation[0] + foundation[1] + foundation[2] + foundation[3])
         * 100 / 52;
-  }
-  
-  bool operator<(const Board& other) const {
-    return heuristic() < other.heuristic();
   }
   
   string serialize() const {
@@ -289,6 +218,7 @@ struct Board {
   static
   Board deserialize(const string& str, const char (&reserve)[RESERVE_SIZE]) {
     Board res;
+    // res.originating_move = &kDeserealizedBoardMove;
     if (str.length() < 4) return res;
     
     size_t i;
@@ -409,22 +339,158 @@ struct Board {
   }
 };
 
+struct MoveStub {
+  enum Place : char { CASCADE = -3, RESERVE = -2, FOUNDATION = -1 };
+  char source;
+  char dest;
+  
+  MoveStub(Card c, Card d):
+      source(c.serialize()), dest(d.serialize()) {}
+  MoveStub(Card c, Place p):
+      source(c.serialize()), dest(p) {}
+  MoveStub(Card c, const Cascade &d):
+      source(c.serialize()), dest(place(d)) {}
+  MoveStub(const Cascade &c, const Cascade &d):
+      source(c.back().serialize()), dest(place(d)) {}
+  MoveStub(const Cascade &c, Place p):
+      source(c.back().serialize()), dest(p) {}
+  
+ private:
+  static char place(const Cascade &c) {
+    if (c.empty()) return Place::CASCADE;
+    return c.back().serialize();
+  }
+};
+
+struct Move: MoveStub {
+  unsigned short depth;
+  char reserve[RESERVE_SIZE] {};
+  const string *board;
+  Move *previous;
+  
+  static const string kSentinelString;
+
+  struct GameStart {};
+  struct DeserealizedBoard {};
+  Move(GameStart):
+      MoveStub(Card{}, FOUNDATION), board(&kSentinelString), previous(nullptr) {}
+  // Move(DeserealizedBoard): MoveStub(Card{}, RESERVE) {}
+  
+  string str() const {
+    if (!source) {
+      switch (dest) {
+        case FOUNDATION: return "Game Start";
+        case RESERVE: return "Invalidly-obtained Deserealized Board";
+        default: return "Invalidly-obtained Board";
+      }
+    }
+    return "Move " + name(source) + " onto " + name(dest);
+  }
+  
+  Move(const string &b, Move &p, const vector<Card> &r, const MoveStub &m)
+      : MoveStub(m), depth(p.depth + 1) , board(&b), previous(&p){
+    for (size_t i = 0; i < r.size(); ++i) reserve[i] = r[i].serialize();
+  }
+  
+ private:
+  static string name(char place) {
+    switch (place) {
+      case CASCADE: return "an empty cascade";
+      case RESERVE: return "an empty reserve";
+      case FOUNDATION: return "the foundation";
+    }
+    return "the " + Card::deserialize(place).str();
+  }
+};
+const string Move::kSentinelString {4, 0};
+static Move kGameStartMove { Move::GameStart{} };
+
+struct SearchBoard: Board {
+  Move *originating_move;
+  
+  int num_moves() const {
+    return originating_move->depth;
+  }
+  
+  int heuristic() const {
+    int heur = (foundation[0] + foundation[1] + foundation[2] + foundation[3])
+        * HEURISTIC_GREED;
+    
+    for (const Cascade &c: cascades) {
+      for (size_t i = 1; i < c.size(); ++i) {
+        if (c[i].face > c[i-1].face) {
+          heur -= (1 + c.size() - i) * INACCESSIBILITY_PUNISHMENT;
+        } else {
+          heur += TABLEAU_REWARD;
+        }
+      }
+    }
+    
+    heur -= num_moves() * MOVE_PUNISHMENT;
+    return heur;
+  }
+  
+  bool operator<(const SearchBoard& other) const {
+    return heuristic() < other.heuristic();
+  }
+
+  SearchBoard(const Board &board, Move &originating_move):
+      Board(board), originating_move(&originating_move) {}
+  SearchBoard(const Board &&board, Move &originating_move):
+      Board(board), originating_move(&originating_move) {}
+};
+
+struct MoveDescription {
+  string action;
+  Board result;
+  
+  MoveDescription(const Move* move): MoveDescription(
+      *NONNULL(move), *NON_NULL(NONNULL(move)->board, "source board")) {}
+  MoveDescription(const Move &move, const string &board):
+      action(move.str()), result(Board::deserialize(board, move.reserve)) {}
+};
+
+typedef vector<MoveDescription> MoveList;
+MoveList describeMoves(const Move *winning_move) {
+  MoveList res;
+  res.reserve(winning_move->depth);
+  
+  for (const Move *mv = winning_move; mv != &kGameStartMove; mv = mv->previous) {
+    res.push_back(MoveDescription {mv});
+  }
+  
+  std::reverse(res.begin(), res.end());
+  return res;
+}
+
+
 // =============================================================================
 // === Search Logic ============================================================
 // =============================================================================
 
-template<int greed> struct SQT {
-  struct SearchQueue: priority_queue<Board> {
+typedef std::unordered_map<string, Move> MoveGraph;
+
+template<bool weights> struct SQT {
+  struct SearchQ: priority_queue<SearchBoard> {
     void pop_back() { c.pop_back(); }
   };
 };
-template<> struct SQT<0> {
-  struct SearchQueue: std::queue<Board> {
-    const Board &top() { return front(); }
+template<> struct SQT<false> {
+  struct SearchQ: std::queue<SearchBoard> {
+    const SearchBoard &top() { return front(); }
     void pop_back() { c.pop_back(); }
   };
 };
-typedef SQT<HEURISTIC_GREED>::SearchQueue SearchQueue;
+
+SQT<HEURISTIC_GREED || INACCESSIBILITY_PUNISHMENT || TABLEAU_REWARD>::SearchQ
+typedef SearchQueue;
+
+struct AvailableMove {
+  MoveStub move;
+  Board board;
+};
+
+// End of type declarations.
 
 bool tableau_stackable(Card c, Card on_c) {
   return c.face == on_c.face + 1 && c.color() != on_c.color();
@@ -439,11 +505,11 @@ bool reserve_to_tableau_valid(const Board& b, size_t reserve, size_t cascade) {
   return tableau_stackable(b.cascades[cascade].back(), b.reserve[reserve]);
 }
 
-Board reserve_to_tableau(const Board& b, size_t reserve, size_t cascade) {
-  Board res = b;
-  res.reserve.erase(res.reserve.begin() + reserve);
-  res.cascades[cascade].push_back(b.reserve[reserve]);
-  res.moves.push_back(Move(b.reserve[reserve], b.cascades[cascade]));
+AvailableMove
+reserve_to_tableau(const Board& b, size_t reserve, size_t cascade) {
+  AvailableMove res { MoveStub(b.reserve[reserve], b.cascades[cascade]), b };
+  res.board.reserve.erase(res.board.reserve.begin() + reserve);
+  res.board.cascades[cascade].push_back(b.reserve[reserve]);
   return res;
 }
 
@@ -453,27 +519,24 @@ bool tableaux_move_valid(const Board& b, size_t source, size_t dest) {
   return tableau_stackable(b.cascades[dest].back(), b.cascades[source].back());
 }
 
-Board tableaux_move(const Board& b, size_t source, size_t dest) {
-  Board res = b;
-  res.cascades[source].pop_back();
-  res.cascades[dest].push_back(b.cascades[source].back());
-  res.moves.push_back(Move(b.cascades[source], b.cascades[dest]));
+AvailableMove tableaux_move(const Board& b, size_t source, size_t dest) {
+  AvailableMove res { MoveStub(b.cascades[source], b.cascades[dest]), b };
+  res.board.cascades[source].pop_back();
+  res.board.cascades[dest].push_back(b.cascades[source].back());
   return res;
 }
 
-Board tableau_to_reserve(const Board& b, size_t source) {
-  Board res = b;
-  res.cascades[source].pop_back();
-  res.reserve.push_back(b.cascades[source].back());
-  res.moves.push_back(Move(b.cascades[source], Move::Place::RESERVE));
+AvailableMove tableau_to_reserve(const Board& b, size_t source) {
+  AvailableMove res { MoveStub(b.cascades[source], Move::Place::RESERVE), b };
+  res.board.cascades[source].pop_back();
+  res.board.reserve.push_back(b.cascades[source].back());
   return res;
 }
 
-Board tableau_to_foundation(const Board& b, size_t source) {
-  Board res = b;
-  res.cascades[source].pop_back();
-  res.foundation[b.cascades[source].back().suit]++;
-  res.moves.push_back(Move(b.cascades[source], Move::Place::FOUNDATION));
+AvailableMove tableau_to_foundation(const Board& b, size_t source) {
+  AvailableMove res { MoveStub(b.cascades[source], Move::Place::FOUNDATION), b };
+  res.board.cascades[source].pop_back();
+  res.board.foundation[b.cascades[source].back().suit]++;
   return res;
 }
 
@@ -486,40 +549,45 @@ bool foundation_to_tableau_valid(
   return board.foundation[foundation] == onto.face - 1;
 }
 
-Board foundation_to_tableau(const Board& b, size_t foundation, size_t cascade) {
-  Board res = b;
+AvailableMove
+foundation_to_tableau(const Board& b, size_t foundation, size_t cascade) {
   Card fcard((Card::Face) b.foundation[foundation], (Card::Suit) foundation);
-  --res.foundation[foundation];
-  res.cascades[cascade].push_back(fcard);
-  res.moves.push_back(Move(fcard, b.cascades[cascade]));
+  AvailableMove res { MoveStub(fcard, b.cascades[cascade]), b };
+  --res.board.foundation[foundation];
+  res.board.cascades[cascade].push_back(fcard);
   return res;
 }
 
-Board reserve_to_foundation(const Board& b, size_t reserve) {
-  Board res = b;
+AvailableMove reserve_to_foundation(const Board& b, size_t reserve) {
+  AvailableMove res { MoveStub(b.reserve[reserve], Move::Place::FOUNDATION), b };
   if (reserve >= b.reserve.size()) abort();
-  res.reserve.erase(res.reserve.begin() + reserve);
-  res.foundation[b.reserve[reserve].suit]++;
-  res.moves.push_back(Move(b.reserve[reserve], Move::Place::FOUNDATION));
+  res.board.reserve.erase(res.board.reserve.begin() + reserve);
+  res.board.foundation[b.reserve[reserve].suit]++;
   return res;
 }
 
-void visit(vector<Board>& dest, Board&& b, u_set<string> &visited) {
-  auto ins = visited.insert(b.serialize());
+void visit(
+    vector<SearchBoard> &dest, Move &p, AvailableMove &&m, MoveGraph &graph) {
+  auto ins = graph.insert(
+      MoveGraph::value_type{ m.board.serialize(), kGameStartMove });
   if (ins.second) {
-    Move fixed(*ins.first, b.reserve, b.moves.back());
-    b.moves.pop_back();
-    b.moves.push_back(fixed);
-    dest.push_back(std::move(b));
+    ins.first->second = Move{ins.first->first, p, m.board.reserve, m.move };
+    dest.push_back({std::move(m.board), ins.first->second});
+  } else {
+    if (p.depth + 1 < ins.first->second.depth) {
+      ins.first->second = Move{ins.first->first, p, m.board.reserve, m.move };
+    }
   }
 }
 
-vector<Board> possible_moves(const Board &board, u_set<string> &visited) {
-  vector<Board> res;
+vector<SearchBoard> possible_moves(
+    const SearchBoard &board, MoveGraph &move_graph) {
+  vector<SearchBoard> res;
+  auto &src_move = *board.originating_move;
   for (size_t i = 0; i < board.cascades.size(); ++i) {
     for (size_t j = 0; j < board.reserve.size(); ++j)  {
       if (reserve_to_tableau_valid(board, j, i)) {
-        visit(res, reserve_to_tableau(board, j, i), visited);
+        visit(res, src_move, reserve_to_tableau(board, j, i), move_graph);
       }
     }
     
@@ -527,28 +595,28 @@ vector<Board> possible_moves(const Board &board, u_set<string> &visited) {
 
     for (size_t j = 0; j < board.cascades.size(); ++j) {
       if (tableaux_move_valid(board, i, j)) {
-        visit(res, tableaux_move(board, i, j), visited);
+        visit(res, src_move, tableaux_move(board, i, j), move_graph);
       }
     }
     
     if (board.reserve.size() < RESERVE_SIZE)  {
-      visit(res, tableau_to_reserve(board, i), visited);
+      visit(res, src_move, tableau_to_reserve(board, i), move_graph);
     }
     
     if (foundation_can_accept(board, board.cascades[i].back())) {
-      visit(res, tableau_to_foundation(board, i), visited);
+      visit(res, src_move, tableau_to_foundation(board, i), move_graph);
     }
     
     for (size_t j = 0; j < 4; ++j) {
       if (foundation_to_tableau_valid(board, j, i)) {
-        visit(res, foundation_to_tableau(board, j, i), visited);
+        visit(res, src_move, foundation_to_tableau(board, j, i), move_graph);
       }
     }
   }
   
   for (size_t i = 0; i < board.reserve.size(); ++i)  {
     if (foundation_can_accept(board, board.reserve[i])) {
-      visit(res, reserve_to_foundation(board, i), visited);
+      visit(res, src_move, reserve_to_foundation(board, i), move_graph);
     }
   }
   
@@ -557,21 +625,21 @@ vector<Board> possible_moves(const Board &board, u_set<string> &visited) {
 
 MoveList solve(Board game) {
   SearchQueue search;
-  search.push(game);
+  search.push({ game, kGameStartMove });
   int bno = 0, ino = 0;
   
-  u_set<string> visited_boards;
+  MoveGraph move_graph;
   
   int compp = 0;
   while (!search.empty()) {
-    const Board &board = search.top();
+    const SearchBoard &board = search.top();
     const int comp = board.completion();
-    const int nmoves = board.moves.size();
+    const int nmoves = board.num_moves();
     if (board.is_won()) {
       cout << endl << "Solution found." << endl << endl;
-      return board.moves;
+      return describeMoves(board.originating_move);
     }
-    auto moves = possible_moves(board, visited_boards);
+    auto moves = possible_moves(board, move_graph);
     search.pop();
     for (auto &move : moves) {
       if (!(++bno & 0xFFFF)) {
@@ -581,8 +649,8 @@ MoveList solve(Board game) {
     }
     if (!(ino++ & 0x1FF) || comp > compp) {
       cout << "Searched " << ino << " boards [" << search.size()
-           << ":" << visited_boards.size() << "]; " << nmoves << " ply; maybe "
-           << comp << "%...\r";
+           << ":" << move_graph.size() << "]; " << nmoves
+           << " moves deep; maybe " << comp << "% complete...\r";
       compp = comp;
     }
     while (search.size() > GC_UPPER_BOUND) {
@@ -592,6 +660,11 @@ MoveList solve(Board game) {
   cout << endl << "Search space exhausted." << endl << endl;
   return {};
 }
+
+
+// =============================================================================
+// === Presentation Logic ======================================================
+// =============================================================================
 
 // This game was so hard, I wrote this program.
 const string kSampleGame =
@@ -651,13 +724,13 @@ int main(int argc, char* argv[]) {
   MoveList winning_moves = solve(game);
   
   if (!interactive || !kUseCurses) {
-    for (const Move &move : winning_moves) {
+    for (const MoveDescription &move : winning_moves) {
       if (interactive || print_boards) {
         cout << (interactive ? "\n" : "\n\n")
-             << Board::deserialize(move.board_state, move.reserve).str()
+             << move.result.str()
              << endl;
       }
-      cout << move.str() << endl;
+      cout << move.action << endl;
       if (interactive) std::cin.get();
     }
   } else if (winning_moves.size()) {
@@ -672,15 +745,14 @@ int main(int argc, char* argv[]) {
       curs_set(FALSE);
       
       int boardwidth = 8 + 7 + 8, boardheight = 0, textwidth = 0;
-      for (const Move &move : winning_moves) {
+      for (const MoveDescription &move : winning_moves) {
         int hgt = 0;
-        Board b = Board::deserialize(move.board_state, move.reserve);
-        for (const Cascade& c : b.cascades) {
+        for (const Cascade& c : move.result.cascades) {
           hgt = std::max(hgt, (int) c.size());
         }
         boardheight = std::max(hgt, boardheight );
-        boardwidth  = std::max((int) b.cascades.size(), boardwidth);
-        textwidth   = std::max((int) move.str().length(), textwidth);
+        boardwidth  = std::max((int) move.result.cascades.size(), boardwidth);
+        textwidth   = std::max((int) move.action.length(), textwidth);
       }
       boardheight += 2;
       
@@ -690,9 +762,8 @@ int main(int argc, char* argv[]) {
           string inst = "Press 'Q' to quit.";
           mvaddstr(boardheight + 2, (COLS - inst.length()) / 2, inst.c_str());
         } else {
-          const Move& move = *at;
-          string board_str =
-              Board::deserialize(move.board_state, move.reserve).str();
+          const MoveDescription& move = *at;
+          string board_str = move.result.str();
           std::basic_string<unsigned int> w(board_str.begin(), board_str.end());
           
           int pcs = 0;
@@ -703,7 +774,7 @@ int main(int argc, char* argv[]) {
             ++pcs;
             if (nl == string::npos) break;
           }
-          string inst = move.str();
+          string inst = move.action;
           mvaddstr(boardheight + 2, (COLS - inst.length()) / 2, inst.c_str());
         }
         
