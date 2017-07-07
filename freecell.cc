@@ -341,58 +341,31 @@ struct Board {
 
 struct MoveStub {
   enum Place : char { CASCADE = -3, RESERVE = -2, FOUNDATION = -1 };
-  char source;
-  char dest;
+  int8_t source; ///< Source Place or Card.
+  int8_t dest; ///< Destination Place or Card.
+  int8_t count; ///< Number of cards to move.
   
-  MoveStub(Card c, Card d):
-      source(c.serialize()), dest(d.serialize()) {}
-  MoveStub(Card c, Place p):
-      source(c.serialize()), dest(p) {}
-  MoveStub(Card c, const Cascade &d):
-      source(c.serialize()), dest(place(d)) {}
-  MoveStub(const Cascade &c, const Cascade &d):
-      source(c.back().serialize()), dest(place(d)) {}
-  MoveStub(const Cascade &c, Place p):
-      source(c.back().serialize()), dest(p) {}
+  MoveStub(Card c, Card d, int8_t count):
+      source(c.serialize()), dest(d.serialize()), count(count) {}
+  MoveStub(Card c, Place p, int8_t count):
+      source(c.serialize()), dest(p), count(count) {}
+  MoveStub(Card c, const Cascade &d, int8_t count):
+      source(c.serialize()), dest(place(d)), count(count) {}
+  MoveStub(const Cascade &c, const Cascade &d, int8_t count):
+      source(c.back().serialize()), dest(place(d)), count(count) {}
+  MoveStub(const Cascade &c, Place p, int8_t count):
+      source(c.back().serialize()), dest(p), count(count) {}
+  
+  string str() const {
+    return "Move " + name(source) + " onto " + name(dest);
+  }
   
  private:
   static char place(const Cascade &c) {
     if (c.empty()) return Place::CASCADE;
     return c.back().serialize();
   }
-};
-
-struct Move: MoveStub {
-  unsigned short depth;
-  char reserve[RESERVE_SIZE] {};
-  const string *board;
-  Move *previous;
   
-  static const string kSentinelString;
-
-  struct GameStart {};
-  struct DeserealizedBoard {};
-  Move(GameStart):
-      MoveStub(Card{}, FOUNDATION), board(&kSentinelString), previous(nullptr) {}
-  // Move(DeserealizedBoard): MoveStub(Card{}, RESERVE) {}
-  
-  string str() const {
-    if (!source) {
-      switch (dest) {
-        case FOUNDATION: return "Game Start";
-        case RESERVE: return "Invalidly-obtained Deserealized Board";
-        default: return "Invalidly-obtained Board";
-      }
-    }
-    return "Move " + name(source) + " onto " + name(dest);
-  }
-  
-  Move(const string &b, Move &p, const vector<Card> &r, const MoveStub &m)
-      : MoveStub(m), depth(p.depth + 1) , board(&b), previous(&p){
-    for (size_t i = 0; i < r.size(); ++i) reserve[i] = r[i].serialize();
-  }
-  
- private:
   static string name(char place) {
     switch (place) {
       case CASCADE: return "an empty cascade";
@@ -402,14 +375,32 @@ struct Move: MoveStub {
     return "the " + Card::deserialize(place).str();
   }
 };
+
+struct Move: MoveStub {
+  char reserve[RESERVE_SIZE] {};
+  unsigned depth;
+  typedef std::pair<const string, Move> GraphEntry;
+  GraphEntry *previous;
+  
+  static const string kSentinelString;
+
+  struct GameStart {};
+  Move(GameStart): MoveStub(Card{}, Card{}, 0), depth(0) , previous(nullptr){}
+  Move(GraphEntry &p, const vector<Card> &r, const MoveStub &m):
+      MoveStub(m), depth(p.second.depth + 1), previous(&p){
+    for (size_t i = 0; i < r.size(); ++i) reserve[i] = r[i].serialize();
+  }
+};
 const string Move::kSentinelString {4, 0};
 static Move kGameStartMove { Move::GameStart{} };
+using GraphEntry = Move::GraphEntry;
 
 struct SearchBoard: Board {
-  Move *originating_move;
+  GraphEntry *originating_move;
+  int depth;
   
   int num_moves() const {
-    return originating_move->depth;
+    return depth;
   }
   
   int heuristic() const {
@@ -434,29 +425,35 @@ struct SearchBoard: Board {
     return heuristic() < other.heuristic();
   }
 
-  SearchBoard(const Board &board, Move &originating_move):
-      Board(board), originating_move(&originating_move) {}
-  SearchBoard(const Board &&board, Move &originating_move):
-      Board(board), originating_move(&originating_move) {}
+  SearchBoard(const Board &board, GraphEntry &originating_move):
+      Board(board), originating_move(&originating_move), depth(originating_move.second.depth) {}
+  SearchBoard(const Board &&board, GraphEntry &originating_move):
+      Board(board), originating_move(&originating_move), depth(originating_move.second.depth) {}
 };
 
 struct MoveDescription {
   string action;
   Board result;
   
-  MoveDescription(const Move* move): MoveDescription(
-      *NONNULL(move), *NON_NULL(NONNULL(move)->board, "source board")) {}
+  MoveDescription(const Move* move, const string &board): MoveDescription(
+      *NONNULL(move), board) {}
   MoveDescription(const Move &move, const string &board):
       action(move.str()), result(Board::deserialize(board, move.reserve)) {}
 };
 
 typedef vector<MoveDescription> MoveList;
-MoveList describeMoves(const Move *winning_move) {
+MoveList describeMoves(const SearchBoard &winning_board) {
   MoveList res;
-  res.reserve(winning_move->depth);
+  res.reserve(winning_board.num_moves());
   
-  for (const Move *mv = winning_move; mv != &kGameStartMove; mv = mv->previous) {
-    res.push_back(MoveDescription {mv});
+  string won_str = winning_board.serialize();
+  const string *board_str = &won_str;
+  
+  for (const Move *mv = &winning_board.originating_move->second; mv->previous;) {
+    res.push_back(MoveDescription {mv, *board_str});
+    cout << res.back().action << endl;
+    board_str = &mv->previous->first;
+    mv = &mv->previous->second;
   }
   
   std::reverse(res.begin(), res.end());
@@ -507,7 +504,7 @@ bool reserve_to_tableau_valid(const Board& b, size_t reserve, size_t cascade) {
 
 AvailableMove
 reserve_to_tableau(const Board& b, size_t reserve, size_t cascade) {
-  AvailableMove res { MoveStub(b.reserve[reserve], b.cascades[cascade]), b };
+  AvailableMove res { MoveStub(b.reserve[reserve], b.cascades[cascade], 1), b };
   res.board.reserve.erase(res.board.reserve.begin() + reserve);
   res.board.cascades[cascade].push_back(b.reserve[reserve]);
   return res;
@@ -520,21 +517,23 @@ bool tableaux_move_valid(const Board& b, size_t source, size_t dest) {
 }
 
 AvailableMove tableaux_move(const Board& b, size_t source, size_t dest) {
-  AvailableMove res { MoveStub(b.cascades[source], b.cascades[dest]), b };
+  AvailableMove res { MoveStub(b.cascades[source], b.cascades[dest], 1), b };
   res.board.cascades[source].pop_back();
   res.board.cascades[dest].push_back(b.cascades[source].back());
   return res;
 }
 
 AvailableMove tableau_to_reserve(const Board& b, size_t source) {
-  AvailableMove res { MoveStub(b.cascades[source], Move::Place::RESERVE), b };
+  AvailableMove res {
+      MoveStub(b.cascades[source], Move::Place::RESERVE, 1), b };
   res.board.cascades[source].pop_back();
   res.board.reserve.push_back(b.cascades[source].back());
   return res;
 }
 
 AvailableMove tableau_to_foundation(const Board& b, size_t source) {
-  AvailableMove res { MoveStub(b.cascades[source], Move::Place::FOUNDATION), b };
+  AvailableMove res {
+      MoveStub(b.cascades[source], Move::Place::FOUNDATION, 1), b };
   res.board.cascades[source].pop_back();
   res.board.foundation[b.cascades[source].back().suit]++;
   return res;
@@ -552,30 +551,30 @@ bool foundation_to_tableau_valid(
 AvailableMove
 foundation_to_tableau(const Board& b, size_t foundation, size_t cascade) {
   Card fcard((Card::Face) b.foundation[foundation], (Card::Suit) foundation);
-  AvailableMove res { MoveStub(fcard, b.cascades[cascade]), b };
+  AvailableMove res { MoveStub(fcard, b.cascades[cascade], 1), b };
   --res.board.foundation[foundation];
   res.board.cascades[cascade].push_back(fcard);
   return res;
 }
 
 AvailableMove reserve_to_foundation(const Board& b, size_t reserve) {
-  AvailableMove res { MoveStub(b.reserve[reserve], Move::Place::FOUNDATION), b };
+  AvailableMove res {
+      MoveStub(b.reserve[reserve], Move::Place::FOUNDATION, 1), b };
   if (reserve >= b.reserve.size()) abort();
   res.board.reserve.erase(res.board.reserve.begin() + reserve);
   res.board.foundation[b.reserve[reserve].suit]++;
   return res;
 }
 
-void visit(
-    vector<SearchBoard> &dest, Move &p, AvailableMove &&m, MoveGraph &graph) {
-  auto ins = graph.insert(
-      MoveGraph::value_type{ m.board.serialize(), kGameStartMove });
+void visit(vector<SearchBoard> &dest,
+    GraphEntry &p, AvailableMove &&m, MoveGraph &graph) {
+  auto ins = graph.insert(GraphEntry{ m.board.serialize(), kGameStartMove });
   if (ins.second) {
-    ins.first->second = Move{ins.first->first, p, m.board.reserve, m.move };
-    dest.push_back({std::move(m.board), ins.first->second});
+    ins.first->second = Move{p, m.board.reserve, m.move };
+    dest.push_back(SearchBoard{std::move(m.board), *ins.first});
   } else {
-    if (p.depth + 1 < ins.first->second.depth) {
-      ins.first->second = Move{ins.first->first, p, m.board.reserve, m.move };
+    if (p.second.depth + 1 < ins.first->second.depth) {
+      ins.first->second = Move{p, m.board.reserve, m.move };
     }
   }
 }
@@ -625,10 +624,12 @@ vector<SearchBoard> possible_moves(
 
 MoveList solve(Board game) {
   SearchQueue search;
-  search.push({ game, kGameStartMove });
-  int bno = 0, ino = 0;
-  
   MoveGraph move_graph;
+  
+  auto ins = move_graph.insert(GraphEntry(game.serialize(), kGameStartMove));
+  search.push({ game, *ins.first });
+  
+  int bno = 0, ino = 0;
   
   int compp = 0;
   while (!search.empty()) {
@@ -637,7 +638,7 @@ MoveList solve(Board game) {
     const int nmoves = board.num_moves();
     if (board.is_won()) {
       cout << endl << "Solution found." << endl << endl;
-      return describeMoves(board.originating_move);
+      return describeMoves(board);
     }
     auto moves = possible_moves(board, move_graph);
     search.pop();
