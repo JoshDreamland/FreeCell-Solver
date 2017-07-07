@@ -72,10 +72,15 @@ template<typename T> T* non_null(T* ref, const char* entity,
 // =============================================================================
 
 struct Card {
-  enum Suit { SPADE, HEART, DIAMOND, CLUB } suit {};
-  enum Face {
+  uint8_t suit : 2;
+  uint8_t face : 5;
+  
+  enum Suit: uint8_t {
+    SPADE, HEART, DIAMOND, CLUB
+  };
+  enum Face: uint8_t {
     EMPTY, A, TWO, THREE, FOUR, FIVE, SIX, SEVEN, EIGHT, NINE, TEN, J, Q, K
-  } face {};
+  };
   
   string str() const {
     static string names[] = {
@@ -107,7 +112,7 @@ struct Card {
   }
 
   bool color() const {
-    return color(suit);
+    return color((Suit) suit);
   }
   
   bool operator==(const Card& c) const {
@@ -122,7 +127,7 @@ struct Card {
     return Card((Face) (c & 15), (Suit) (c / 16));
   }
   
-  Card() {}
+  Card(): suit(0), face(0) {}
   Card(Face f, Suit s): suit(s), face(f) {}
   Card(string desc) {
     size_t i = 0;
@@ -451,7 +456,6 @@ MoveList describeMoves(const SearchBoard &winning_board) {
   
   for (const Move *mv = &winning_board.originating_move->second; mv->previous;) {
     res.push_back(MoveDescription {mv, *board_str});
-    cout << res.back().action << endl;
     board_str = &mv->previous->first;
     mv = &mv->previous->second;
   }
