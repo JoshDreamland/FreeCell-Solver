@@ -44,16 +44,20 @@ constexpr size_t TABLEAU_REWARD = 1;
 //
 // MOVE_PUNISHMENT
 //   Heuristic deduction for each move taken. Higher values produce shorter
-//   solutions, at the cost of widening the search space.
+//   solutions, at the cost of widening the search space. Do not exceed the
+//   HEURISTIC_GREED parameter, or the search will fight itself. Do not go
+//   below zero, or the search will simply optimize for long solutions.
 //
 // INACCESSIBILITY_PUNISHMENT
 //   Heuristic cost of having high-value cards stacked on top of low-value
 //   cards. Higher values will make the play more human-like, for better or
-//   for worse.
+//   for worse. There isn't a strong correlation between this value and the
+//   quality of your results—such is human play.
 //
 // TABLEAU_REWARD
 //   Complementary to INACCESSIBILITY_PUNISHMENT, this value rewards having
-//   larger stacks of decreasing card ranks.
+//   larger stacks of decreasing card ranks. As this value approaches the other
+//   heuristics, the search begins to screw around instead of solve the problem.
 
 #define NONNULL(ref) non_null(ref, #ref, __func__, __FILE__, __LINE__)
 #define NON_NULL(ref, entity) non_null(ref, entity, __func__, __FILE__, __LINE__)
