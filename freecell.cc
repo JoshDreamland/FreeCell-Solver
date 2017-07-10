@@ -34,9 +34,9 @@ constexpr size_t GC_UPPER_BOUND = 1 << 20; ///< Maximum search space.
 
 // Heuristic weights
 constexpr size_t HEURISTIC_GREED = 32;
-constexpr size_t MOVE_PUNISHMENT = 8;
-constexpr size_t INACCESSIBILITY_PUNISHMENT = 64;
-constexpr size_t TABLEAU_REWARD = 4;
+constexpr size_t MOVE_PUNISHMENT = 32;
+constexpr size_t INACCESSIBILITY_PUNISHMENT = 32;
+constexpr size_t TABLEAU_REWARD = 1;
 
 // HEURISTIC_GREED
 //   Heuristic bias toward number of cards in the foundation.
@@ -729,7 +729,7 @@ typedef vector<MoveDescription> MoveList;
 MoveList describeMoves(const SearchBoard &winning_board) {
   MoveList res;
   res.reserve(winning_board.num_moves());
-  for (const SearchBoard *b = &winning_board; b; b = b->previous) {
+  for (const SearchBoard *b = &winning_board; b->previous; b = b->previous) {
     res.push_back(MoveDescription {b->action_taken, *b});
   }
   std::reverse(res.begin(), res.end());
