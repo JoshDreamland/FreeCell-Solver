@@ -563,26 +563,42 @@ struct Board {
   
   Board() {}
   Board(const FluffyBoard &b) {
+    int total_cards = 0;
     for (card_count_t i = 0; i < 4; ++i) {
       if (b.foundation[i].value &&
           (b.foundation[i].suit != i || !b.foundation[i].face)) {
-        cerr << "Ill-constructed board state elaboration. Bad foundation."
+        cerr << "Invalid board state. Bad foundation."
              << " (Slot " << (int) i << ":  Suit=" << (int) b.foundation[i].suit
              << ", Face=" << (int) b.foundation[i].face << ")";
         abort();
       }
       foundation[i] = b.foundation[i].face;
+      total_cards += foundation[i];
     }
     for (card_count_t i = 0; i < RESERVE_SIZE; ++i) {
-      cout << b.reserve[i].str() << endl;
       reserve[i] = b.reserve[i];
+      if (reserve[i]) ++total_cards;
     }
     if (b.cascades.size() > CASCADE_COUNT) {
-      cerr << "Ill-constructed board state elaboration. Too many cascades: "
+      cerr << "Invalid board state. Too many cascades: "
            << "expected " << (int) CASCADE_COUNT << " or fewer; got "
            << b.cascades.size() << endl;
       abort();
     }
+    
+    /* Compute and check total card count. */ {
+      for (card_count_t i = 0; i < CASCADE_COUNT; ++i) {
+        total_cards += b.cascades[i].size();
+      }
+    }
+    
+    if (total_cards > TOTAL_CARDS) {
+      cerr << "Invalid board state. Too many cards: Board contains "
+           << (int) total_cards << " cards, but the limit is "
+           << (int) TOTAL_CARDS << endl;
+      abort();
+    }
+    
     card_count_t d = 0;
     for (card_count_t i = 0; i < CASCADE_COUNT; ++i) {
       for (Card c : b.cascades[i]) cards[d++] = c;
