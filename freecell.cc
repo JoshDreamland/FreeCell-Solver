@@ -15,6 +15,8 @@ constexpr bool kUseCurses = true;
 constexpr bool kUseCurses = false;
 #endif
 
+#define DEBUG_MODE
+
 using std::cerr;
 using std::cout;
 using std::endl;
@@ -28,7 +30,8 @@ using u_set = std::unordered_set<K...>;
 typedef uint8_t card_count_t; ///< Smallest integer that can count all cards.
 constexpr card_count_t RESERVE_SIZE = 4; ///< Number of reserve slots.
 constexpr card_count_t CASCADE_COUNT = 8; ///< Number of cascades (places to put a tableau).
-constexpr card_count_t TOTAL_CARDS = 52; ///< Total number of cards in the game.
+constexpr card_count_t NUM_DECKS = 1; ///< Number of complete decks of cards.
+constexpr card_count_t TOTAL_CARDS = 52 * NUM_DECKS; ///< Total number of cards in the game.
 
 constexpr size_t GC_UPPER_BOUND = 1 << 20; ///< Maximum search space.
 
@@ -130,7 +133,7 @@ struct Card {
   
   void clear() { value = 0; }
   
-  Card(): suit(0), face(0) {}
+  Card(): value(0) {}
   Card(Face f, Suit s): suit(s), face(f) {}
   Card(int8_t v): value(v) {}
   Card(string desc) {
@@ -523,7 +526,7 @@ struct Board {
   
   bool is_won() const {
     for (int i = 0; i < 4; ++i) {
-      if (foundation[i] < Card::Face::K) return false;
+      if (foundation[i] < Card::Face::K * NUM_DECKS) return false;
     }
     return true;
   }
@@ -537,7 +540,8 @@ struct Board {
     FluffyBoard res;
     for (int i = 0; i < 4; ++i) {
       if (foundation[i]) {
-        res.foundation[i] = Card((Card::Face) foundation[i], (Card::Suit) i);
+        int face = foundation[i] % Card::Face::K ?: Card::Face::K;
+        res.foundation[i] = Card((Card::Face) face, (Card::Suit) i);
       } else {
         res.foundation[i].clear();
       }
@@ -562,7 +566,9 @@ struct Board {
     for (card_count_t i = 0; i < 4; ++i) {
       if (b.foundation[i].value &&
           (b.foundation[i].suit != i || !b.foundation[i].face)) {
-        cerr << "Ill-constructed board state elaboration. Bad foundation.\n";
+        cerr << "Ill-constructed board state elaboration. Bad foundation."
+             << " (Slot " << (int) i << ":  Suit=" << (int) b.foundation[i].suit
+             << ", Face=" << (int) b.foundation[i].face << ")";
         abort();
       }
       foundation[i] = b.foundation[i].face;
@@ -573,7 +579,7 @@ struct Board {
     }
     if (b.cascades.size() > CASCADE_COUNT) {
       cerr << "Ill-constructed board state elaboration. Too many cascades: "
-           << "expected " << CASCADE_COUNT << " or fewer; got "
+           << "expected " << (int) CASCADE_COUNT << " or fewer; got "
            << b.cascades.size() << endl;
       abort();
     }
@@ -777,7 +783,7 @@ bool tableau_stackable(Card btm, Card top) {
 }
 
 bool foundation_can_accept(const Board& b, Card c) {
-  return b.foundation[c.suit] == c.face - 1;
+  return c && (b.foundation[c.suit] + 1) % Card::Face::K == c.face % Card::Face::K;
 }
 
 bool reserve_to_tableau_valid(const Board& b, int reserve, size_t cascade) {
