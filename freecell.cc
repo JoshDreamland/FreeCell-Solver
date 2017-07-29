@@ -40,6 +40,7 @@ constexpr size_t HEURISTIC_GREED = 32;
 constexpr size_t MOVE_PUNISHMENT = 32;
 constexpr size_t INACCESSIBILITY_PUNISHMENT = 32;
 constexpr size_t TABLEAU_REWARD = 1;
+constexpr size_t RESERVE_REWARD = 64;
 
 // HEURISTIC_GREED
 //   Heuristic bias toward number of cards in the foundation.
@@ -61,6 +62,11 @@ constexpr size_t TABLEAU_REWARD = 1;
 //   Complementary to INACCESSIBILITY_PUNISHMENT, this value rewards having
 //   larger stacks of decreasing card ranks. As this value approaches the other
 //   heuristics, the search begins to screw around instead of solve the problem.
+//
+// RESERVE_REWARD
+//   Yet another heuristic leaning toward human play. There is no strong
+//   correlation between a reserve-averse strategy and a good solution or
+//   a fast search. Avoid overpowering other heuristics too heavily.
 
 #define NONNULL(ref) non_null(ref, #ref, __func__, __FILE__, __LINE__)
 #define NON_NULL(ref, entity) non_null(ref, entity, __func__, __FILE__, __LINE__)
@@ -333,6 +339,11 @@ struct Board {
     return ind ? cards[ind - 1] : Card();
   }
   
+  card_count_t cascade_size(card_count_t i) const {
+    card_count_t base = i ? cascade_divs[i - 1] + 1 : 0;
+    return cascade_divs[i] - base;
+  }
+  
   bool cascade_empty(card_count_t i) const {
     return (!i && !cascade_divs[0]) || cascade_divs[i] == 1 + cascade_divs[i-1];
   }
@@ -536,6 +547,23 @@ struct Board {
         * 100 / 52;
   }
   
+  card_count_t count_free_reserves() const {
+    card_count_t res = 0;
+    for (card_count_t i = 0; i < RESERVE_SIZE; ++i) if (!reserve[i]) ++res;
+    return res;
+  }
+  
+  card_count_t count_empty_cascades() const {
+    card_count_t res = 0, lci = cascade_divs[0];
+    if (!lci) ++res;
+    for (card_count_t i = 1; i < CASCADE_COUNT; ++i) {
+      const card_count_t ci = cascade_divs[i];
+      if (ci == lci + 1) ++res;
+      lci = ci;
+    }
+    return res;
+  }
+  
   FluffyBoard inflate() const {
     FluffyBoard res;
     for (int i = 0; i < 4; ++i) {
@@ -618,7 +646,9 @@ struct Move {
                 ///< Must always be 13 or fewer, if not ≤ 5.
   
   string str() const {
-    return "Move " + name(source) + " onto " + name(dest);
+    string count_str = count > 1
+        ? " (and " + std::to_string(count - 1) + " more)" : "";
+    return "Move " + name(source) + count_str + " onto " + name(dest);
   }
   
   static const Move kGameStartMove;
@@ -682,6 +712,7 @@ struct SearchBoard: Board {
       ++i;
     }
     
+    heur += count_free_reserves() * RESERVE_REWARD;
     heur -= num_moves() * MOVE_PUNISHMENT;
     return heur;
   }
@@ -813,16 +844,10 @@ SearchBoard reserve_to_tableau(const SearchBoard &b, int reserve, int cascade) {
   return res;
 }
 
-bool tableaux_move_valid(const Board& b, int source, int dest) {
-  // tableau_stackable trivially returns true if dest is empty, and will still
-  // return false if the source is empty because the zero card will not be an
-  // increase in value over whatever the contents of dest are.
-  return tableau_stackable(b.cascade_back(dest), b.cascade_back(source));
-}
-
-SearchBoard tableaux_move(const SearchBoard &b, size_t source, size_t dest) {
-  SearchBoard res { &b, Move(b.cascade(source), b.cascade(dest), 1) };
-  res.copy_from_but_move(b, source, dest, 1);
+SearchBoard tableaux_move(const SearchBoard &b,
+    card_count_t source, card_count_t dest, card_count_t count) {
+  SearchBoard res { &b, Move(b.cascade(source), b.cascade(dest), count) };
+  res.copy_from_but_move(b, source, dest, count);
   return res;
 }
 
@@ -887,6 +912,8 @@ void visit(
 vector<const SearchBoard*>
 possible_moves(const SearchBoard &board, MoveGraph &move_graph) {
   vector<const SearchBoard*> res;
+  card_count_t num_free_reserves = board.count_free_reserves();
+  card_count_t num_empty_cascades = board.count_empty_cascades();
   for (card_count_t i = 0; i < CASCADE_COUNT; ++i) {
     for (card_count_t j = 0; j < RESERVE_SIZE; ++j)  {
       if (reserve_to_tableau_valid(board, j, i)) {
@@ -896,9 +923,19 @@ possible_moves(const SearchBoard &board, MoveGraph &move_graph) {
     
     if (board.cascade_empty(i)) continue;
 
+    card_count_t size = board.cascade_size(i);
+    card_count_t back = board.cascade_end(i);
     for (card_count_t j = 0; j < CASCADE_COUNT; ++j) {
-      if (tableaux_move_valid(board, i, j)) {
-        visit(res, tableaux_move(board, i, j), move_graph);
+      for (card_count_t l = 1; ; ) {
+        Card cur = board.cards[back - l];
+        if (tableau_stackable(board.cascade_back(j), cur)) {
+          visit(res, tableaux_move(board, i, j, l), move_graph);
+        }
+        if (++l > size) break;
+        if (!tableau_stackable(board.cards[back - l], cur)) break;
+        if (l > num_free_reserves + num_empty_cascades) break;
+        // XXX: It would be wise to use * above instead of +, except some
+        // freecell engines don't allow complicated automatic moves.
       }
     }
     
@@ -1045,6 +1082,9 @@ int main(int argc, char* argv[]) {
       }
       cout << move.action << endl;
       if (interactive) std::cin.get();
+    }
+    if (!interactive) {
+      cout << "Game complete (" << winning_moves.size() << " moves)" << endl;
     }
   } else if (winning_moves.size()) {
 #   ifndef USE_CURSES
