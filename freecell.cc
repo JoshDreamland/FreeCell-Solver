@@ -904,6 +904,7 @@ void visit(
       if (board.previous->depth + 1 < ins.first->depth) {
         ins.first->depth = board.previous->depth + 1;
         ins.first->previous = board.previous;
+        ins.first->action_taken = board.action_taken;
       }
     }
   }
